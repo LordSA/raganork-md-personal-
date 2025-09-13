@@ -94,7 +94,7 @@ if (require.main === module) {
 
 //auto ping..
 
-const https = require("https");
+/** const https = require("https");
 
 const URL = process.env.APP_URL || "https://my-application-a2zr.onrender.com";
 
@@ -105,3 +105,6 @@ setInterval(() => {
     console.error("Ping error: " + err.message);
   });
 }, 8 * 60 * 1000); // 8mins
+**/
+
+
