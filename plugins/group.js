@@ -1,6 +1,34 @@
 const { getString } = require("./utils/lang");
 const Lang = getString("group");
-const { delay } = require("baileys");
+
+let delay;
+
+async function loadBaileys() {
+  try {
+
+    const baileys = await import("baileys");
+    return baileys;
+  } catch (err) {
+    try {
+
+      const baileys = require("baileys");
+      return baileys;
+    } catch (requireErr) {
+      throw new Error(
+        `Failed to load baileys: ${err.message}. Fallback error: ${requireErr.message}`
+      );
+    }
+  }
+}
+
+const baileysPromise = loadBaileys()
+  .then((baileys) => {
+    ({ delay } = baileys);
+  })
+  .catch((err) => {
+    console.error("Failed to load baileys:", err.message);
+    process.exit(1);
+  });
 const { isAdmin, isNumeric, mentionjid } = require("./utils");
 const { ADMIN_ACCESS, HANDLERS, MODE } = require("../config");
 const { Module } = require("../main");
