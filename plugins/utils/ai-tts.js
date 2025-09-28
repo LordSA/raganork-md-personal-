@@ -33,6 +33,16 @@ async function aiTTS(text, voice = "coral", speed = "1.00") {
       formData,
       { headers: formData.getHeaders() }
     );
+    // Add this after getting the URL
+if (data?.Error === 0 && data?.URL) {
+  // Verify URL is accessible before returning
+  try {
+    await axios.head(data.URL, { timeout: 5000 });
+    return { url: data.URL };
+  } catch (urlError) {
+    return { error: "Generated audio URL is not accessible" };
+  }
+}
     if (data?.Error === "Usage Limit exceeded") {
       return { error: "TTS API usage limit exceeded", response: data };
     }
@@ -46,3 +56,4 @@ async function aiTTS(text, voice = "coral", speed = "1.00") {
 }
 
 module.exports = aiTTS;
+
