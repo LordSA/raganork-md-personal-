@@ -25,6 +25,7 @@ let config = require("../../config");
 const ReplyMessage = require("./reply-message");
 const fs = require("fs");
 const { genThumb } = require("../helpers");
+const { getTempPath } = require("../helpers");
 
 class Message extends Base {
   constructor(client, data) {
@@ -53,7 +54,10 @@ class Message extends Base {
 
     this.senderName = data.pushName;
     this.myjid = botNumeric;
-    this.message = data.message?.extendedTextMessage?.text ?? data.message?.conversation ?? "";
+    this.message =
+      data.message?.extendedTextMessage?.text ??
+      data.message?.conversation ??
+      "";
     this.text = this.message;
     this.timestamp = data.messageTimestamp;
     this.data = data;
@@ -269,11 +273,11 @@ class Message extends Base {
       );
     const buffer = await downloadMediaMessage(this.data, "buffer");
     if (type === "buffer") return buffer;
-    var filename =
-      "./temp/temp." +
+    const ext =
       this.data.message[Object.keys(this.data.message)[0]].mimetype?.split(
         "/"
       )[1];
+    const filename = getTempPath(`temp.${ext}`);
     await fs.writeFileSync(filename, buffer);
     return filename;
   }
@@ -377,22 +381,12 @@ class Message extends Base {
       );
     }
   }
-  async edit(text = "", _jid = false, _key = false) {
-    return await this.client.relayMessage(
-      _jid || this.jid,
-      {
-        protocolMessage: {
-          key: _key,
-          type: 14,
-          editedMessage: {
-            conversation: text,
-          },
-        },
-      },
-      {}
-    );
+  async edit(text = "", _jid = this.jid, _key = false) {
+    return await this.client.sendMessage(_jid, {
+      text,
+      edit: _key,
+    });
   }
-
   async getThumb(url) {
     return await genThumb(url);
   }
