@@ -1,14 +1,17 @@
 const { Module } = require("../main");
 const {
-  pinSearch,
+  pinterestSearch,
   getBuffer,
   downloadGram,
-  pin,
+  pinterestDl,
   tiktok,
   igStalk,
   fb,
 } = require("./utils");
+const { getTempPath } = require("../core/helpers");
 const fileType = require("file-type");
+const fs = require("fs");
+const ffmpeg = require("fluent-ffmpeg");
 
 const getFileType = async (buffer) => {
   try {
@@ -22,7 +25,6 @@ const getFileType = async (buffer) => {
 
     return await fileType(buffer);
   } catch (error) {
-    console.log("file-type detection failed:", error);
     return null;
   }
 };
@@ -32,11 +34,6 @@ const isFromMe = botConfig.MODE === "public" ? false : true;
 const commandHandlerPrefix =
   botConfig.HANDLERS !== "false" ? botConfig.HANDLERS.split("")[0] : "";
 
-function disableCertificateCheck() {
-  if (process.env.NODE_TLS_REJECT_UNAUTHORIZED != 0) {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = 0;
-  }
-}
 async function checkRedirect(url) {
   let split_url = url.split("/");
   if (split_url.includes("share")) {
@@ -88,7 +85,9 @@ Module(
         );
       }
       if (downloadResult === false)
-        return await message.sendReply("*Download failed*");
+        return await message.sendReply(
+          "_Something went wrong, Please try again!_"
+        );
 
       const quotedMessage = message.reply_message
         ? message.quoted
@@ -130,24 +129,16 @@ Module(
     if (/\bhttps?:\/\/\S+/gi.test(videoLink)) {
       videoLink = videoLink.match(/\bhttps?:\/\/\S+/gi)[0];
     }
-    if (!videoLink) return await message.sendReply("*Need Facebook link*");
-
-    const facebookDownloadResult = await fb(videoLink);
-    const sentMessage = await message.sendReply(
-      "_*Hold on, downloading will take some time..*_"
-    );
-
-    await message.sendReply(
-      {
-        url: facebookDownloadResult.url,
-      },
-      "video"
-    );
-    return await message.edit(
-      "*_Download complete!_*",
-      message.jid,
-      sentMessage.key
-    );
+    if (!videoLink) return await message.sendReply("_Need facebook link_");
+    try {
+      const { url } = await fb(videoLink);
+      return await message.sendReply({ url }, "video");
+    } catch (e) {
+      console.error("Facebook download error:", e.message);
+      return await message.sendReply(
+        "_Something went wrong, Please try again!_"
+      );
+    }
   }
 );
 
@@ -239,55 +230,73 @@ Module(
     pattern: "pinterest ?(.*)",
     fromMe: isFromMe,
     desc: "Pinterest downloader",
-    usage: ".pinterest reply or link",
+    usage: ".pinterest query or link",
     use: "download",
   },
   async (message, match) => {
     let userQuery = match[1] !== "" ? match[1] : message.reply_message.text;
     if (userQuery === "g") return;
     if (!userQuery)
-      return await message.sendReply("*Need text or Pinterest URL*");
+      return await message.sendReply("_Need search term or pin video link_");
 
     if (/\bhttps?:\/\/\S+/gi.test(userQuery)) {
       userQuery = userQuery.match(/\bhttps?:\/\/\S+/gi)[0];
+      let pinterestResult;
       try {
-        var pinterestResult = await pin(userQuery);
-      } catch {
-        return await message.sendReply("*Server error*");
+        pinterestResult = await pinterestDl(userQuery);
+      } catch (err) {
+        console.error("pinterestDl error:", err?.message || err);
+        return await message.sendReply("_Server error_");
       }
-      const quotedMessage = message.reply_message
-        ? message.quoted
-        : message.data;
-      await message.sendMessage(
-        { url: pinterestResult },
-        pinterestResult.endsWith("jpg") ? "image" : "video",
-        {
-          quoted: quotedMessage,
-        }
-      );
+
+      if (
+        !pinterestResult ||
+        !pinterestResult.status ||
+        !pinterestResult.result
+      )
+        return await message.sendReply(
+          "_No downloadable media found for this link_"
+        );
+
+      const url = pinterestResult.result;
+      const quotedMessage = message.reply_message ? message.quoted : message.data;
+      await message.sendMessage({url}, "video", { quoted: quotedMessage });
     } else {
       let desiredCount = parseInt(userQuery.split(",")[1]) || 5;
       let searchQuery = userQuery.split(",")[0] || userQuery;
-      const searchResults = await pinSearch(searchQuery, desiredCount);
+      let searchResults;
+      try {
+        const res = await pinterestSearch(searchQuery, desiredCount);
+        if (!res || !res.status || !Array.isArray(res.result)) {
+          return await message.sendReply("_No results found for this query_");
+        }
+        searchResults = res.result;
+      } catch (err) {
+        console.error("pinterestSearch error:", err?.message || err);
+        return await message.sendReply(
+          "_Server error while searching Pinterest_"
+        );
+      }
 
+      const toDownload = Math.min(desiredCount, searchResults.length);
       await message.sendReply(
-        `_Downloading ${searchResults.length} results for ${searchQuery} from Pinterest_`
+        `_Downloading ${toDownload} results for ${searchQuery} from Pinterest_`
       );
 
       let successfulDownloads = 0;
-      for (
-        let i = 0;
-        i < searchResults.length && successfulDownloads < desiredCount;
-        i++
-      ) {
+      for (let i = 0;i < searchResults.length && successfulDownloads < toDownload; i++) {
         try {
-          const mediaBuffer = await getBuffer(searchResults[i]);
-          if (mediaBuffer) {
-            await message.sendMessage(mediaBuffer, "image");
-            successfulDownloads++;
-          }
+          const url = searchResults[i];
+          await message.sendMessage(
+            {url},
+            "image"
+          );
+          successfulDownloads++;
         } catch (error) {
-          console.error(`Error downloading Pinterest image: ${error.message}`);
+          console.error(
+            "Error downloading pinterest item:",
+            error?.message || error
+          );
         }
       }
     }
@@ -296,45 +305,23 @@ Module(
 
 Module(
   {
-    pattern: "pin ?(.*)",
-    fromMe: isFromMe,
-    use: "download",
-  },
-  async (message, match) => {
-    let userQuery = match[1] !== "" ? match[1] : message.reply_message.text;
-    if (!userQuery || userQuery === "g" || userQuery.startsWith("terest"))
-      return;
-    await message.sendReply(
-      "_Use .pinterest command for downloading content from this query!_"
-    );
-  }
-);
-
-Module(
-  {
     pattern: "tiktok ?(.*)",
     fromMe: isFromMe,
-    desc: "TikTok downloader",
+    desc: "TikTok video downloader",
     usage: ".tiktok reply or link",
     use: "download",
   },
   async (message, match) => {
     let videoLink = match[1] !== "" ? match[1] : message.reply_message.text;
     if (!videoLink) return await message.sendReply("_Need a TikTok URL_");
-
     videoLink = videoLink.match(/\bhttps?:\/\/\S+/gi)[0];
     let downloadResult;
     try {
-      downloadResult = (await tiktok(videoLink)).result;
-      await message.sendReply(
-        {
-          url: downloadResult,
-        },
-        "video"
-      );
+      downloadResult = await tiktok(videoLink);
+      await message.sendReply(downloadResult, "video");
     } catch (error) {
-      await message.sendReply(
-        "```" + `Download failed\n\nResponse: ${downloadResult}` + "```"
+      return await message.sendReply(
+        "_Something went wrong, Please try again!_"
       );
     }
   }
