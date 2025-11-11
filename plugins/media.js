@@ -38,42 +38,23 @@ Module(
       (!message.reply_message.video && !message.reply_message.audio)
     )
       return await message.sendReply(Lang.TRIM_NEED_REPLY);
+    if (!match[1] || !match[1].includes(","))
+      return await message.sendReply(
+        message.reply_message.audio ? Lang.TRIM_NEED : Lang.TRIM_VIDEO_NEED
+      );
+    const parts = match[1].split(",");
+    const start = parts[0]?.trim();
+    const end = parts[1]?.trim();
+    const savedFile = await message.reply_message.download();
+    await message.sendMessage("_Processing trim..._");
     if (message.reply_message.audio) {
-      if (match[1] === "" || !match[1].includes(","))
-        return await message.sendReply(Lang.TRIM_NEED);
-      var savedFile = await message.reply_message.download();
-      var trimmed = await trim(
-        savedFile,
-        match[1].split(",")[0],
-        match[1].split(",")[1],
-        getTempPath("trim.mp3")
-      );
-      var result = fs.readFileSync(getTempPath("trim.mp3"));
-      await message.client.sendMessage(
-        message.jid,
-        {
-          audio: result,
-          mimetype: "audio/mp4",
-          ptt: false,
-        },
-        {
-          quoted: message.data,
-        }
-      );
-    }
-    if (message.reply_message.video) {
-      if (match[1] === "" || !match[1].includes(","))
-        return await message.sendReply(Lang.TRIM_VIDEO_NEED);
-      var savedFile = await message.reply_message.download();
-      trimVideo(
-        savedFile,
-        match[1].split(",")[0],
-        match[1].split(",")[1],
-        getTempPath("trim.mp4"),
-        async function (video) {
-          return await message.send(video, "video");
-        }
-      );
+      const out = getTempPath("trim.ogg");
+      await trim(savedFile, start, end, out);
+      await message.sendReply({stream: fs.createReadStream(out)}, "audio");
+    } else if (message.reply_message.video) {
+      const out = getTempPath("trim.mp4");
+      await trim(savedFile, start, end, out);
+      await message.send({stream: fs.createReadStream(out)}, "video");
     }
   }
 );
