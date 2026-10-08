@@ -1,4 +1,5 @@
 let generateWAMessageFromContent,
+  generateWAMessageContent,
   proto,
   prepareWAMessageMedia,
   generateForwardMessageContent,
@@ -9,6 +10,7 @@ const baileysPromise = loadBaileys()
   .then((baileys) => {
     ({
       generateWAMessageFromContent,
+      generateWAMessageContent,
       proto,
       prepareWAMessageMedia,
       generateForwardMessageContent,
@@ -93,9 +95,7 @@ class Message extends Base {
       this.quoted = {
         key: {
           remoteJid: contextInfo.remoteJid,
-          fromMe:
-            quotedParticipantJid?.split("@")[0] ===
-            this.client.user?.id?.split(":")[0],
+          fromMe: this.reply_message.fromMe,
           id: this.reply_message.id,
           participant: quotedParticipantJid,
         },
@@ -170,6 +170,112 @@ class Message extends Base {
     });
   }
 
+  _isGroupStatusType(type = "") {
+    if (!type || typeof type !== "string") return false;
+    const normalized = type.toLowerCase();
+    return [
+      "groupstatus",
+      "group-status",
+      "group_status",
+      "groupstatusmessage",
+      "groupstatusmessagev2",
+      "gstatus",
+      "gs",
+    ].includes(normalized);
+  }
+
+  _buildGroupStatusPayload(content, messageOptions = {}) {
+    const source =
+      content &&
+      typeof content === "object" &&
+      !Buffer.isBuffer(content) &&
+      content.groupStatusMessage
+        ? content.groupStatusMessage
+        : content;
+
+    if (typeof source === "string") {
+      return { text: source, ...messageOptions };
+    }
+
+    if (Buffer.isBuffer(source) || source instanceof Uint8Array) {
+      const mediaType = (messageOptions.mediaType || "image").toLowerCase();
+      const payload = { ...messageOptions };
+      delete payload.mediaType;
+
+      if (mediaType === "video") {
+        payload.video = source;
+      } else if (mediaType === "audio") {
+        payload.audio = source;
+      } else {
+        payload.image = source;
+      }
+      return payload;
+    }
+
+    if (source && typeof source === "object") {
+      return { ...source, ...messageOptions };
+    }
+
+    return { text: "", ...messageOptions };
+  }
+
+  async sendGroupStatus(content, options = {}) {
+    await baileysPromise;
+
+    if (!this.jid.endsWith("@g.us")) {
+      throw new Error("Group status can only be sent to a group chat.");
+    }
+
+    if (
+      typeof generateWAMessageFromContent !== "function" ||
+      typeof generateWAMessageContent !== "function"
+    ) {
+      throw new Error("Baileys helpers are not ready to send group status.");
+    }
+
+    const { quoted, ...messageOptions } = options;
+    const payload = this._buildGroupStatusPayload(content, messageOptions);
+
+    if ((payload.image || payload.video) && payload.text && !payload.caption) {
+      payload.caption = payload.text;
+      delete payload.text;
+    }
+
+    const userJid = this.client.user?.id || this.client.user?.jid;
+    const waMsgContent =
+      payload.message && typeof payload.message === "object"
+        ? payload.message
+        : await generateWAMessageContent(payload, {
+            upload: this.client.waUploadToServer,
+            mediaCache: this.client.mediaCache,
+            options: this.client.options,
+            logger: this.client.logger,
+            userJid,
+            jid: this.jid,
+          });
+
+    const groupStatusContent = {
+      groupStatusMessageV2: {
+        message: waMsgContent.message || waMsgContent,
+      },
+    };
+
+    const waMessage = generateWAMessageFromContent(
+      this.jid,
+      groupStatusContent,
+      {
+        quoted,
+        userJid,
+      }
+    );
+
+    await this.client.relayMessage(this.jid, waMessage.message, {
+      messageId: waMessage.key.id,
+    });
+
+    return waMessage;
+  }
+
   async sendMessage(content, type = "text", options = {}) {
     const { ephemeralExpiration, quoted, ...messageOptions } = options;
 
@@ -181,6 +287,19 @@ class Message extends Base {
     }
     if (quoted) {
       realOptions.quoted = quoted;
+    }
+
+    const hasGroupStatusPayload =
+      content &&
+      typeof content === "object" &&
+      !Buffer.isBuffer(content) &&
+      content.groupStatusMessage;
+
+    if (this._isGroupStatusType(type) || hasGroupStatusPayload) {
+      return await this.sendGroupStatus(content, {
+        ...messageOptions,
+        quoted: realOptions.quoted,
+      });
     }
 
     if (type == "text") {
@@ -337,7 +456,201 @@ class Message extends Base {
   async sendInteractiveMessage(jid, list, options) {
     return null;
   }
-  
+
+  async sendButtonMessage(content, options = {}) {
+    await baileysPromise;
+    const { toBuffer } = require("../helpers");
+    const {
+      buildInteractiveButtons,
+      validateAuthoringButtons,
+      validateInteractiveMessageContent,
+      getButtonType,
+      getButtonArgs,
+    } = require("../helpers");
+
+    const {
+      title = "",
+      footer = "",
+      header = "",
+      buttons = [],
+      image = null,
+      video = null,
+      document = null,
+      fileName = null,
+      mimetype = null,
+      jpegThumbnail = null,
+      contextInfo = {},
+      externalAdReply = null,
+      quoted = null,
+      ephemeralExpiration = null,
+    } = content;
+
+    if (!buttons || buttons.length === 0) {
+      throw new Error("At least one button is required");
+    }
+
+    // validate and clean buttons
+    const { errors: btnErrors, warnings: btnWarnings, cleaned: cleanedButtons } = validateAuthoringButtons(buttons);
+    if (btnErrors.length > 0) {
+      throw new Error("Button validation failed: " + btnErrors.join("; "));
+    }
+    if (btnWarnings.length > 0) {
+      console.warn("Button warnings:", btnWarnings);
+    }
+
+    const interactiveButtons = buildInteractiveButtons(cleanedButtons);
+
+    let mediaPayload = null;
+
+    try {
+      if (image) {
+        if (typeof image === "string" && (image.startsWith("http://") || image.startsWith("https://"))) {
+          mediaPayload = { image: { url: image } };
+        } else {
+          const imageBuffer = await toBuffer(image);
+          mediaPayload = { image: imageBuffer };
+        }
+
+        const prepared = await prepareWAMessageMedia(
+          mediaPayload,
+          { upload: this.client.waUploadToServer }
+        );
+        if (prepared.imageMessage) {
+          mediaPayload = prepared;
+        }
+      } else if (video) {
+        if (typeof video === "string" && (video.startsWith("http://") || video.startsWith("https://"))) {
+          mediaPayload = { video: { url: video } };
+        } else {
+          const videoBuffer = await toBuffer(video);
+          mediaPayload = { video: videoBuffer };
+        }
+
+        const prepared = await prepareWAMessageMedia(
+          mediaPayload,
+          { upload: this.client.waUploadToServer }
+        );
+        if (prepared.videoMessage) {
+          mediaPayload = prepared;
+        }
+      } else if (document) {
+        let docPayload;
+        if (typeof document === "string" && (document.startsWith("http://") || document.startsWith("https://"))) {
+          docPayload = { document: { url: document } };
+        } else {
+          const docBuffer = await toBuffer(document);
+          docPayload = { document: docBuffer };
+        }
+
+        if (jpegThumbnail) {
+          docPayload.jpegThumbnail = jpegThumbnail;
+        }
+
+        const prepared = await prepareWAMessageMedia(
+          docPayload,
+          { upload: this.client.waUploadToServer }
+        );
+        if (prepared.documentMessage) {
+          if (fileName) {
+            prepared.documentMessage.fileName = fileName;
+          }
+          if (mimetype) {
+            prepared.documentMessage.mimetype = mimetype;
+          }
+          mediaPayload = prepared;
+        }
+      }
+    } catch (err) {
+      console.error("Error preparing media for button message:", err.message);
+      mediaPayload = null;
+    }
+
+    const interactiveMessageBody = {
+      body: { text: title || "" },
+      footer: { text: footer || "" },
+      nativeFlowMessage: {
+        buttons: interactiveButtons,
+      },
+    };
+
+    if (mediaPayload) {
+      interactiveMessageBody.header = {
+        title: header || "",
+        hasMediaAttachment: true,
+        ...mediaPayload,
+      };
+    } else {
+      interactiveMessageBody.header = {
+        title: header || "",
+        hasMediaAttachment: false,
+      };
+    }
+
+    let finalContextInfo = {
+      mentionedJid: contextInfo.mentionedJid || [],
+      forwardingScore: contextInfo.forwardingScore || 0,
+      isForwarded: contextInfo.isForwarded || false,
+      ...contextInfo,
+    };
+
+    if (externalAdReply) {
+      finalContextInfo.externalAdReply = {
+        title: externalAdReply.title || "",
+        body: externalAdReply.body || "",
+        mediaType: externalAdReply.mediaType || 1,
+        thumbnailUrl: externalAdReply.thumbnailUrl || "",
+        mediaUrl: externalAdReply.mediaUrl || "",
+        sourceUrl: externalAdReply.sourceUrl || "",
+        showAdAttribution: externalAdReply.showAdAttribution || false,
+        renderLargerThumbnail:
+          externalAdReply.renderLargerThumbnail || false,
+        ...externalAdReply,
+      };
+    }
+
+    if (Object.keys(finalContextInfo).length > 0) {
+      interactiveMessageBody.contextInfo = finalContextInfo;
+    }
+
+    const messageContent = {
+      interactiveMessage: interactiveMessageBody,
+    };
+
+    const { errors: contentErrors, warnings: contentWarnings, valid: contentValid } = validateInteractiveMessageContent(messageContent);
+    if (!contentValid) {
+      throw new Error("Interactive message validation failed: " + contentErrors.join("; "));
+    }
+    if (contentWarnings.length > 0) {
+      console.warn("Interactive message warnings:", contentWarnings);
+    }
+
+    const userJid = this.client.user?.id || this.client.user?.jid;
+    const waMessage = generateWAMessageFromContent(this.jid, messageContent, {
+      quoted: quoted || null,
+      userJid,
+    });
+
+    const realOptions = {};
+    if (this.ephemeral && !ephemeralExpiration) {
+      realOptions.ephemeralExpiration = this.ephemeral.expiration;
+    } else if (ephemeralExpiration) {
+      realOptions.ephemeralExpiration = ephemeralExpiration;
+    }
+
+    // Get button args for proper relay
+    const buttonType = getButtonType(messageContent);
+    let additionalNodes = [];
+    if (buttonType) {
+      additionalNodes.push(getButtonArgs(messageContent));
+    }
+
+    return await this.client.relayMessage(this.jid, waMessage.message, {
+      messageId: waMessage.key.id,
+      additionalNodes,
+    });
+  }
+
+  // @deprecated
   async forwardMessage(jid, message, options = {}) {
     let vtype;
     let mtype = getContentType(message.message);
